@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 검증용: 호스트 PC의 로컬 HTTPS 서버(자체 서명 인증서)만 추가로 신뢰한다. 평문 HTTP는 허용하지 않는다.
+     API 24 이상에서만 적용된다. API 23은 SampleApplication에서 처리한다. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <trust-anchors>
+            <certificates src="@raw/mock_ca" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>

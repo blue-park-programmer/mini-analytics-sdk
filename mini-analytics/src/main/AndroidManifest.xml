@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 이벤트 전송에 필요하다. 호스트 앱의 manifest에 병합된다. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+</manifest>

@@ -1,0 +1,16 @@
+# Gradle
+.gradle/
+build/
+.kotlin/
+
+# Local configuration
+local.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Python (tools/device-verification)
+__pycache__/
+*.pyc

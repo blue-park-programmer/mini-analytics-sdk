@@ -1,0 +1,71 @@
+# mini-analytics 공개 JVM API (release AAR, javap -public 기준)
+# 생성: ./gradlew :mini-analytics:updatePublicApi. 이름이 바뀐 internal 멤버($mini_analytics_release)와 $default 합성 메서드는 제외.
+
+public final class io.github.dduddupark.minianalytics.Configuration {
+  public boolean equals(java.lang.Object);
+  public int hashCode();
+  public java.lang.String toString();
+  public io.github.dduddupark.minianalytics.Configuration(java.lang.String, java.lang.String, int, long, int, boolean, kotlin.jvm.internal.DefaultConstructorMarker);
+}
+
+public final class io.github.dduddupark.minianalytics.Configuration$Builder {
+  public io.github.dduddupark.minianalytics.Configuration$Builder(java.lang.String, java.lang.String);
+  public final io.github.dduddupark.minianalytics.Configuration$Builder flushAt(int);
+  public final io.github.dduddupark.minianalytics.Configuration$Builder flushIntervalMillis(long);
+  public final io.github.dduddupark.minianalytics.Configuration$Builder maxQueuedEvents(int);
+  public final io.github.dduddupark.minianalytics.Configuration$Builder trustInvalidEventResponses(boolean);
+  public final io.github.dduddupark.minianalytics.Configuration build();
+}
+
+public final class io.github.dduddupark.minianalytics.FailureReason extends java.lang.Enum<io.github.dduddupark.minianalytics.FailureReason> {
+  public static final io.github.dduddupark.minianalytics.FailureReason STORAGE_ERROR;
+  public static final io.github.dduddupark.minianalytics.FailureReason NOT_INITIALIZED;
+  public static final io.github.dduddupark.minianalytics.FailureReason INVALID_ARGUMENT;
+  public static io.github.dduddupark.minianalytics.FailureReason[] values();
+  public static io.github.dduddupark.minianalytics.FailureReason valueOf(java.lang.String);
+  public static kotlin.enums.EnumEntries<io.github.dduddupark.minianalytics.FailureReason> getEntries();
+}
+
+public interface io.github.dduddupark.minianalytics.IdentityCallback {
+  public abstract void onComplete(io.github.dduddupark.minianalytics.IdentityResult);
+}
+
+public abstract class io.github.dduddupark.minianalytics.IdentityResult {
+  public io.github.dduddupark.minianalytics.IdentityResult(kotlin.jvm.internal.DefaultConstructorMarker);
+}
+
+public final class io.github.dduddupark.minianalytics.IdentityResult$Failure extends io.github.dduddupark.minianalytics.IdentityResult {
+  public io.github.dduddupark.minianalytics.IdentityResult$Failure(io.github.dduddupark.minianalytics.FailureReason, java.lang.Throwable);
+  public final io.github.dduddupark.minianalytics.FailureReason getReason();
+  public final java.lang.Throwable getCause();
+  public java.lang.String toString();
+}
+
+public final class io.github.dduddupark.minianalytics.IdentityResult$Success extends io.github.dduddupark.minianalytics.IdentityResult {
+  public static final io.github.dduddupark.minianalytics.IdentityResult$Success INSTANCE;
+  public java.lang.String toString();
+}
+
+public final class io.github.dduddupark.minianalytics.InitializeResult extends java.lang.Enum<io.github.dduddupark.minianalytics.InitializeResult> {
+  public static final io.github.dduddupark.minianalytics.InitializeResult STARTED;
+  public static final io.github.dduddupark.minianalytics.InitializeResult ALREADY_INITIALIZED;
+  public static final io.github.dduddupark.minianalytics.InitializeResult INVALID_CONFIGURATION;
+  public static io.github.dduddupark.minianalytics.InitializeResult[] values();
+  public static io.github.dduddupark.minianalytics.InitializeResult valueOf(java.lang.String);
+  public static kotlin.enums.EnumEntries<io.github.dduddupark.minianalytics.InitializeResult> getEntries();
+}
+
+public final class io.github.dduddupark.minianalytics.MiniAnalytics {
+  public static final io.github.dduddupark.minianalytics.MiniAnalytics INSTANCE;
+  public static final io.github.dduddupark.minianalytics.InitializeResult initialize(android.content.Context, io.github.dduddupark.minianalytics.Configuration);
+  public static final void track(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void screen(java.lang.String, java.util.Map<java.lang.String, ? extends java.lang.Object>);
+  public static final void identify(java.lang.String, io.github.dduddupark.minianalytics.IdentityCallback);
+  public static final void reset(io.github.dduddupark.minianalytics.IdentityCallback);
+  public static final void flush();
+  public static final void track(java.lang.String);
+  public static final void screen(java.lang.String);
+  public static final void identify(java.lang.String);
+  public static final void reset();
+}
+
