@@ -71,7 +71,7 @@ e2e 1개도 추가했습니다(trust=false 서버에서 격리 없음). 기존 �
 ## 3. 미검증 항목 (통과로 표시하지 않음)
 | 항목 | 상태 |
 |---|---|
-| **실제 물리 기기** | 미검증. 모든 기기 검증은 Apple Silicon 호스트의 arm64 **에뮬레이터**에서 함 |
+| **실제 물리 기기** | 이 보고서 작성 시점에는 미검증. 이후 Galaxy S23(Android 16 / API 36) 1대에서 검증함: `v1-physical-device-report.md` (P5 Doze는 PASS가 아니라 LIMIT/REVIEW, 11장) |
 | **운영 서버** | 미검증. 로컬 계약 서버(테스트 전용)와 MockWebServer만 사용. 운영 서버가 계약(2xx 의미, `messageId` 중복 제거, `invalid_event`, identify 멱등성)을 지키는지는 SDK가 검증할 수 없음 |
 | **실제 모바일 네트워크** | 미검증. 지연, 패킷 손실, Wi-Fi↔LTE 전환, 비행기 모드, 캡티브 포털 |
 | TLS | 로컬 CA만 검증. 공인 CA 체인, 인증서 핀닝, 프록시, TLS 버전 협상 차이는 미검증 |

@@ -131,7 +131,7 @@ Java에서 `null`을 넘겨도 NPE가 나지 않습니다. 결과는 "무시 + �
 | 배치 | 최대 100건 / 512KB, 저장 순서대로 |
 | 삭제 | 서버가 처리 완료(2xx)를 확인한 배치만 삭제 |
 | 보장 수준 | **at-least-once**. 같은 이벤트는 항상 같은 `messageId`로 재전송 |
-| 백그라운드 전송 | 하지 않음. 남은 이벤트는 다음 실행에서 전송 |
+| 백그라운드 전송 | 별도 작업을 예약하지 않음. 프로세스가 실행 중일 때만 전송 (아래 "백그라운드 전송 정책") |
 
 ### 실패 정책
 | 응답 | 처리 |
@@ -145,6 +145,18 @@ Java에서 `null`을 넘겨도 NPE가 나지 않습니다. 결과는 "무시 + �
 | 그 밖의 응답 (3xx, 404 등) | 유지. 5분 간격, `Log.e`. 리다이렉트는 따라가지 않음 |
 | backoff 중 | 어떤 trigger도 다음 시도를 앞당기지 않음 |
 | 로그 | 같은 종류의 실패는 처음 한 번과 그 뒤 1시간마다 한 번 (생략 횟수 표시) |
+
+### 백그라운드 전송 정책 (v1)
+v1은 **앱 프로세스가 실행 중일 때만** 전송하고 재시도합니다. WorkManager, `JobScheduler`, `AlarmManager`, foreground service를 사용하지 않습니다.
+
+- **재시도 타이머는 프로세스 안에만 있습니다.** backoff 대기는 SDK 내부의 코루틴 타이머입니다. 프로세스가 실행되지 않으면 타이머도 실행되지 않습니다.
+- **프로세스가 종료된 경우**(사용자의 강제 종료, 저메모리 종료, 백그라운드 프로세스 정리 등): 남은 재시도는 사라집니다. 이벤트는 SQLite에 남아 있으므로 **다음에 앱이 실행되어 `initialize()`가 호출될 때** 같은 `messageId`로 전송됩니다.
+- **Android가 프로세스를 freeze한 경우**(최근 Android 버전의 cached app freezer 등. 백그라운드로 간 앱은 수십 초 안에 freeze될 수 있으며, 적용 여부와 시점은 OS 버전과 제조사에 따라 다름): 프로세스는 살아 있지만 코드가 실행되지 않으므로, 재시도 타이머가 freeze가 풀릴 때까지 실행되지 않습니다. 앱이 다시 실행되거나 전면으로 오면 이어서 전송합니다.
+- **Doze와 앱 대기 버킷**: Doze 중에는 앱의 네트워크 접근이 막혀 전송이 실패하고 backoff로 이어집니다. Doze가 풀린 뒤에도 프로세스가 freeze되어 있으면 위와 같이 다음 실행까지 늦어집니다.
+- 이 경우들에서 **이벤트는 유실되지 않습니다.** 대신 전달이 다음 실행까지 늦어질 수 있습니다. 앱이 오래 실행되지 않으면 그만큼 늦어지고, 그 사이 저장 상한(`maxQueuedEvents`)을 넘으면 가장 오래된 이벤트부터 버려집니다.
+- 실기기(Galaxy S23, Android 16) 관찰: Doze 해제 30초 뒤 백그라운드 sample 프로세스가 freeze되었고, 약 6분 동안 재시도가 없다가 앱을 다시 실행하자 8초 뒤 전달되었습니다 (`docs/design/v1-physical-device-report.md` 10.4, 11장).
+
+**WorkManager를 쓰지 않는 이유**: v1은 런타임 의존성을 `kotlin-stdlib`와 `kotlinx-coroutines-core`로 제한합니다. WorkManager를 넣으면 호스트 앱에 androidx 의존성과 초기화(App Startup), 작업 예약 정책이 추가되고, 백그라운드 실행 제한과 배터리 정책도 SDK가 책임져야 합니다. 백그라운드 전달이 꼭 필요하다면 호스트 앱이 자기 작업(WorkManager 등) 안에서 `MiniAnalytics.flush()`를 호출할 수 있습니다. 단, 그 작업이 실행되는 동안 backoff 대기 중이면 `flush()`도 다음 시도를 앞당기지 않습니다(위 "backoff 중").
 
 ### 이벤트가 유실될 수 있는 경우
 - `initialize()` 전에 호출한 경우
@@ -191,7 +203,8 @@ SDK와 수신 서버 사이의 **명시적 계약**입니다. 일반적인 HTTP 
 
 ## 검증 범위
 - JVM 단위 테스트, 에뮬레이터(API 23·33·36)의 instrumented test와 sample 앱 시나리오(debug, R8 release)로 검증했습니다.
-- **검증하지 않은 것**: 실제 물리 기기, API 24~32·34~35, 실제 운영 서버, 공인 CA 인증서·핀닝·프록시, 실제 모바일 네트워크(지연, 손실, 전환), Doze와 저메모리 종료, 저장 지연과 처리량 측정. 자세한 목록은 `docs/design/v1-final-report.md`에 있습니다.
+- 물리 기기 1대(Galaxy S23, Android 16 / API 36)에서 기본 시나리오와 비행기 모드, Wi-Fi↔LTE 전환, 백그라운드 전환·종료, Doze 시나리오를 검증했습니다(debug, R8 release). Doze는 해제 후 프로세스 freeze 때문에 다음 실행에서 전달된 경우를 포함하며, 판정과 한계는 `docs/design/v1-physical-device-report.md`에 있습니다.
+- **검증하지 않은 것**: 다른 제조사·Android 버전의 물리 기기, API 24~32·34~35, 실제 운영 서버, 공인 CA 인증서·핀닝·프록시, 손실·지연이 큰 실제 모바일 네트워크, 자연 발생 Doze(강제 진입만 검증), 저장 지연과 처리량 측정. 자세한 목록은 `docs/design/v1-final-report.md`에 있습니다.
 
 ## 개발
 ```bash
@@ -204,4 +217,5 @@ python3 tools/device-verification/verify.py --serial emulator-5554 --variant deb
 ```
 - **공개 API 검증**: `checkPublicApi`(`check`에 포함)는 release AAR의 공개 JVM 시그니처를 [`docs/api/public-api.txt`](docs/api/public-api.txt)와 비교하고, 다르면 빌드를 실패시킵니다. 의도한 변경이라면 `./gradlew :mini-analytics:updatePublicApi`로 기준 파일을 갱신하고 diff를 리뷰하세요.
 - **배포와 sample 빌드를 한 번의 Gradle 실행에서 함께 하면**, sample이 이전 스냅샷으로 컴파일될 수 있습니다. 위처럼 나눠서 실행하세요.
-`tools/device-verification/verify.py`는 로컬 HTTPS 계약 서버(테스트 전용)를 띄우고, adb로 `:sample` 앱의 시나리오를 실행합니다. 시나리오에는 TLS, StrictMode, 프로세스 종료 후 복원, 리다이렉트, 단건 격리가 포함됩니다.
+`tools/device-verification/verify.py`는 로컬 HTTPS 계약 서버(테스트 전용)를 띄우고, adb로 `:sample` 앱의 시나리오를 실행합니다. 시나리오에는 TLS, StrictMode, 프로세스 종료 후 복원, 리다이렉트, 단건 격리가 포함됩니다. 물리 기기 사용법은 `verify.py` 머리말과 `docs/design/v1-physical-device-report.md`에 있습니다.
+- **sample의 테스트 인증서 신뢰 범위**: sample 앱은 `-PsampleEndpoint`(기본 `https://10.0.2.2:8443/v1/batch`)의 **호스트 하나에만** 테스트 CA를 신뢰합니다(API 24 이상은 빌드 때 생성되는 network security config, API 23은 호스트별 `SSLSocketFactory`). https가 아니거나 loopback·사설 IPv4가 아닌 주소는 빌드가 실패합니다. 이것은 sample 전용이며, SDK는 인증서 검증을 바꾸지 않고 플랫폼 기본 `HttpsURLConnection` 설정을 따릅니다.
