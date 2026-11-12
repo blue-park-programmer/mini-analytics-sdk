@@ -5,7 +5,7 @@
 - **상태: 물리 기기 검증 완료 (Galaxy S23, Android 16 / API 36).**
   - A안 기본 시나리오: debug 9/9, R8 release 9/9 (8장)
   - B안 네트워크·백그라운드 시나리오: P1~P4·S9는 debug·R8 release 모두 PASS (10장)
-  - **P5(Doze)는 PASS가 아닙니다** (11장에서 판정 기준을 고쳐 다시 판정): debug는 **REVIEW**(Doze 해제 후 재전송을 확인하지 못함), R8 release는 **LIMIT**(Doze 해제 후 프로세스가 freeze되어 재시도가 없었고, 앱 재실행 후 전달됨. v1 설계 범위의 제약)
+  - **P5(Doze)는 PASS가 아닙니다.** 새 P5 도구로 실기기에서 다시 실행한 결과(11.8, 2026-11-12) debug·R8 release 모두 **LIMIT**입니다. Doze 해제 30초 뒤 백그라운드 프로세스가 freeze되어 재시도가 없었고, 앱 재실행 후 같은 messageId로 전달되었습니다(v1 설계 범위의 제약, 유실 없음). 2026-11-10 실행의 재판정은 debug REVIEW, release LIMIT입니다(11.1)
   - 7장과 9장은 중단 당시의 기록입니다. 9장의 P1 실패 원인은 10장에서 확정했습니다.
 
 ## 1. 연결 상태 확인 결과 (2026-11-10)
@@ -320,7 +320,7 @@ Caused by: android.os.strictmode.DiskReadViolation
 | **비행기 모드를 끈 뒤 60초 안에 Wi-Fi가 연결되지 않음** | `오프라인 재시작 후 복구=False` = 도구의 `wait_online()`(wlan0 IPv4와 기본 네트워크 확인)이 60초 안에 성립하지 않음 |
 | 그 뒤 330초 동안 10건이 서버에 도착하지 않음 | `10건 전달=False` |
 | 이어진 P2에서 도구가 Wi-Fi를 끄고(`svc wifi disable`, 12:30:35) 다시 켠 뒤로는 Wi-Fi가 정상 연결됨 | 중단 직후 `wifi_on=1`, wlan0 `192.168.0.21`, 연결됨 |
-| 중단 직후 기기 설정은 원래와 같음 | `airplane_mode_on=0, wifi_on=1, mobile_data=1` (시작 전 기록과 일치), Doze `ACTIVE`, `mForceIdle=false` |
+| 중단 직후 기기 설정은 원래와 같음 | `airplane_mode_on=0, wifi_on=1, mobile_data=1` (시작 전 기록과 일치), Doze 아님(deviceidle 상태 `ACTIVE` = 정상 상태), `mForceIdle=false` |
 | P1 구간의 앱과 SDK 로그는 남아 있지 않음 | P2 시작 때 도구가 `logcat -b all -c`로 버퍼를 비움. 서버 요청 기록도 도구 종료와 함께 사라짐 |
 
 ### 9.3 원인 판단 (확정 아님)
@@ -430,12 +430,12 @@ Caused by: android.os.strictmode.DiskReadViolation
 - 이는 설계상 범위입니다. v1은 WorkManager나 foreground service를 쓰지 않으며, 프로세스가 실행 중일 때만 전송하고, 네트워크 상태를 감지하지 않습니다(9.3에서 언급한 설계 Q22).
 - debug P3·P4에서는 freeze 전에(30초 안에) 재시도가 끝나 이 현상이 드러나지 않았습니다.
 - 운영 영향: **앱이 백그라운드에서 freeze된 동안 쌓인 이벤트는 다음 실행 또는 freeze 해제 때 전송됩니다.** README의 "전송 시점" 설명에 이 내용을 명시할지는 사용자가 결정해야 합니다(아래 10.6).
-- 첫 시도의 `ConnectException`(unfreeze 직후 0.01초)은 앱의 네트워크 접근이 프로세스 상태 갱신보다 늦게 풀린 것으로 보입니다. 다음 재시도에서 성공했으므로 SDK 동작에는 문제가 없습니다. 원인은 확정하지 않았습니다.
+- unfreeze 0.01초 뒤의 첫 시도가 `ConnectException`으로 실패했고, 다음 재시도에서 성공했습니다(관찰된 사실). **이 실패의 원인은 확정하지 않았습니다.** 가설로는 앱의 네트워크 접근 제한이 프로세스 상태 갱신보다 늦게 풀리는 경우를 생각할 수 있으나 검증하지 않았습니다.
 
 ### 10.5 정리 상태
 | 항목 | 상태 |
 |---|---|
-| 기기 설정 | `airplane_mode_on=0, wifi_on=1, mobile_data=1, stay_on_while_plugged_in=0` → 시작 전 기록과 같음. Doze `ACTIVE`(unforce), 배터리 상태 reset(USB 전원으로 표시) |
+| 기기 설정 | `airplane_mode_on=0, wifi_on=1, mobile_data=1, stay_on_while_plugged_in=0` → 시작 전 기록과 같음. Doze 아님(`deviceidle unforce` 후 상태 `ACTIVE` = 정상 상태), 배터리 상태 reset(USB 전원으로 표시) |
 | 앱 | sample(도구가 종료 시 삭제), `io.github.dduddupark.strictprobe`(삭제) → 기기에 남은 테스트 앱 없음 |
 | `adb reverse` | 항목 없음 |
 | 테스트 인증서 | `tools/device-verification/mock_cert.pem`, `mock_key.pem`, `sample/src/main/res/raw/mock_ca.pem`을 백업(= HEAD)에서 복원. git diff 없음, 키와 인증서 공개키 일치 확인 |
@@ -474,7 +474,7 @@ Caused by: android.os.strictmode.DiskReadViolation
 | **재판정** | **REVIEW** (해제 후 재전송 미확인. PASS 아님) | **LIMIT** (v1 설계 범위의 제약. PASS 아님) |
 
 - 결과 JSON(`results/physical-…-physical-*.json`)에는 당시 판정(PASS)이 그대로 남아 있습니다. 이 문서의 재판정이 우선합니다.
-- 실기기는 2026-11-12 기준 연결되어 있지 않아, **새 P5 도구로 실기기에서 다시 실행하지는 못했습니다**(11.3은 에뮬레이터 결과).
+- 이 절을 쓸 때는 실기기가 연결되어 있지 않아 11.3을 에뮬레이터에서 실행했습니다. 같은 날 실기기를 다시 연결해 새 도구로 실행한 결과는 11.8에 있습니다.
 
 ### 11.2 P5 검증 도구 수정 (`verify.py`, SDK 변경 없음)
 | 변경 | 내용 |
@@ -513,7 +513,7 @@ Caused by: android.os.strictmode.DiskReadViolation
 - Doze는 `force-idle`로 **강제 진입**만 검증했습니다. 화면 꺼짐과 움직임 없음으로 자연스럽게 들어가는 Doze, maintenance window, 앱 대기 버킷은 검증하지 않았습니다.
 - 물리 suite 동안 도구가 화면을 켜 두므로(`svc power stayon usb`) 실제 사용 환경과 다릅니다.
 - freeze 시점(해제 30초 뒤)은 이 기기와 에뮬레이터 이미지에서 관찰한 값이며, OS 버전과 제조사에 따라 다를 수 있습니다.
-- 실기기에서 새 도구로 다시 실행하지 못했습니다. 실기기 P5 판정(11.1)은 당시 로그로 다시 매긴 것입니다.
+- 11.1의 실기기 판정은 당시 로그로 다시 매긴 것입니다. 새 도구로 실기기에서 다시 실행한 결과는 11.8에 있습니다.
 
 ### 11.5 sample 앱의 테스트 인증서 신뢰 범위 제한 (SDK 변경 없음)
 **이전**: `base-config`에서 시스템 CA와 테스트 CA를 **모든 주소에** 신뢰(10장 실행 때의 임시 설정). API 23은 기본 `SSLSocketFactory`를 테스트 CA**만** 신뢰하는 것으로 바꿔서, 모든 HTTPS 연결에 적용.
@@ -556,4 +556,52 @@ Caused by: android.os.strictmode.DiskReadViolation
 | `./gradlew :mini-analytics:assembleRelease :mini-analytics:testDebugUnitTest :mini-analytics:check --rerun-tasks` | BUILD SUCCESSFUL. `testDebugUnitTest` 297/297, `testReleaseUnitTest` 297/297, lint 통과, `checkPublicApi` 기준 파일과 일치 |
 | `./gradlew :sample:assembleDebug :sample:assembleRelease` | BUILD SUCCESSFUL |
 | 에뮬레이터 API 36 / 23 | 11.3, 11.5 |
-| 실기기 | 연결되지 않아 실행하지 않음 |
+| 실기기 | 11.7 작성 시점에는 연결되지 않음. 이후 새 P5를 실행함 (11.8) |
+
+### 11.8 새 P5 도구 실기기 실행 (2026-11-12, Galaxy S23, Android 16 / API 36)
+- 환경: B안(Mac LAN `192.168.0.10`, 기기 Wi-Fi `192.168.0.22`). 임시 인증서(SAN에 LAN IP)는 `--extra-ip`로 만들고 실행 뒤 `--restore-cert`로 복원.
+- sample은 `-PsampleEndpoint=https://192.168.0.10:8443/v1/batch`로 빌드. 생성된 network security config의 `domain-config`는 `192.168.0.10` 하나. **11.5의 신뢰 범위 제한이 실기기 TLS에서도 동작함**(503·200 응답을 정상 수신).
+
+| 변형 | 판정 | 요약 |
+|---|---|---|
+| debug | **LIMIT** | Doze 중 서버 수신 0/5, Doze 중 SDK 네트워크 실패 로그 2줄, 해제 후 같은 프로세스 재전송 0/5 (360초), freeze 기록 있음, 재실행 후 전달·같은 messageId |
+| R8 release | **LIMIT** | 같음 |
+
+- Crash 0, ANR 0, StrictMode OURS 0, UNCLASSIFIED 0. FRAMEWORK 5(`IdsController`, `android.system.Os`)
+
+| 시각 (debug) | 사건 |
+|---|---|
+| 10:33:01.0 | track 5건 → 10:33:01.4, 01.9 503 (Doze 전) |
+| 10:33:01.8 | Doze 강제 진입, 서버 503 유지 |
+| 10:33:06.9 | 서버 정상 응답으로 전환 (Doze 유지) |
+| 10:33:07.4 | `SocketException: Software caused connection abort` |
+| 10:33:23.3 | `SocketTimeoutException` (15초) → **Doze의 앱 네트워크 차단 확인** |
+| 10:33:42.0 | Doze 해제 |
+| **10:34:12.3** | **`ActivityManager: freezing 9212`** (해제 30초 뒤) |
+| 10:34:12 ~ 10:39:43 | 요청 없음 (해제부터 360초 대기 끝) |
+| 10:39:43.55 | 도구가 앱 재실행 → `quick sync unfreeze 9212` |
+| 10:39:43.59 | 첫 시도 즉시 `ConnectException` (unfreeze 40ms 뒤) |
+| 10:40:43.2 | **200**, 같은 messageId 5건, `Upload succeeded after 7 failed attempt(s)` (재실행 60초 뒤) |
+
+release: 진입 10:40:54 → 해제 10:41:34 → **freeze 10:42:04.5 (30초 뒤)** → 재실행 10:47:35.6 → 즉시 `ConnectException` → **200 10:48:14 (재실행 39초 뒤)**.
+
+**관찰 (SDK 결함으로 판단하지 않음, 코드 변경 없음)**
+1. **관찰된 사실: freeze 해제 직후 첫 시도가 실패했습니다.** unfreeze 40ms 뒤 밀려 있던 재시도가 바로 실행되었고, `ConnectException`(`Failed to connect to /192.168.0.10:8443`)으로 실패했습니다. 실기기에서는 2026-11-10 release 실행(unfreeze 0.01초 뒤)과 이번 debug·release 실행 모두 같았습니다.
+   - **에뮬레이터(11.3)에서는 이 실패가 관찰되지 않았습니다.** unfreeze 뒤 0.5~0.6초 만에 200을 받았습니다(debug 10:18:04.7 → 10:18:05.3, release 10:24:52.6 → 10:24:53.2). 그 실행의 증거 파일(`results/physical/{debug,release}-P5-*`)은 이번 실기기 실행이 같은 이름으로 덮어써서 남아 있지 않습니다. 이 시각들은 덮어쓰기 전에 추출해 둔 값입니다.
+   - **원인은 확정하지 않았습니다.** 가설로는 앱의 네트워크 접근 제한이 프로세스 상태 갱신보다 늦게 풀리는 경우(실기기와 에뮬레이터의 OS 이미지 차이 포함)를 생각할 수 있으나, 네트워크 정책 상태를 그 시점에 기록하지 않아 검증하지 못했습니다.
+2. **그 실패 때문에 전달이 backoff만큼 더 늦어집니다.** 연속 실패 7회 뒤의 backoff는 full jitter 0~64초이고, 이번에는 60초와 39초였습니다. 2026-11-10 실행은 6회 뒤라 8초였습니다.
+   - 같은 프로세스가 freeze에서 풀린 것이므로 `initialize()`의 시작 시 확인은 다시 일어나지 않습니다. 재시도는 backoff를 따릅니다.
+   - README의 "freeze가 풀리면 이어서 전송"은 맞지만, **즉시가 아니라 최대 수십 초 늦어질 수 있습니다.**
+   - 개선 후보(이번에 구현하지 않음): 프로세스가 전면으로 돌아올 때 backoff를 재설정하거나 한 번 더 시도.
+3. 진단 파일(해제 후 360초 대기가 끝난 시점, 재실행 전에 수집)에는 deviceidle 상태 `ACTIVE`(Doze 아님)와 `mScreenOn=true`(도구의 화면 유지)가 기록되어 있습니다. 앱 UID의 netpolicy 제한 항목은 없었습니다. freeze가 풀린 순간의 네트워크 정책 상태는 기록하지 않았습니다.
+
+**정리 상태**
+| 항목 | 상태 |
+|---|---|
+| 기기 설정 | `airplane_mode_on=0, wifi_on=1, mobile_data=1, stay_on_while_plugged_in=0` (시작 전과 같음) |
+| Doze | **해제됨.** 실행 후 다시 확인: `deviceidle get deep` = `ACTIVE`, `get light` = `ACTIVE`, `get force` = `false`, `mForceIdle=false`. deviceidle의 `ACTIVE`는 Doze가 아닌 정상 상태입니다. 배터리 상태도 reset되어 실제 값(USB 전원, 충전 중)을 표시. 복원할 항목 없음 |
+| 기기의 sample 앱 | 도구가 삭제 |
+| `adb reverse` | 항목 없음 |
+| 인증서 | `--restore-cert`로 복원, HEAD와 같음, 키와 인증서 공개키 일치 |
+| sample 빌드 산출물 | 기본 endpoint(`10.0.2.2`)로 다시 빌드 |
+| 결과 | `results/physical-<serial>-api36-physical.json`, `results/physical/{debug,release}-P5-*` (gitignore 대상) |
