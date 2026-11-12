@@ -203,7 +203,7 @@ SDK와 수신 서버 사이의 **명시적 계약**입니다. 일반적인 HTTP 
 
 ## 검증 범위
 - JVM 단위 테스트, 에뮬레이터(API 23·33·36)의 instrumented test와 sample 앱 시나리오(debug, R8 release)로 검증했습니다.
-- 물리 기기 1대(Galaxy S23, Android 16 / API 36)에서 기본 시나리오와 비행기 모드, Wi-Fi↔LTE 전환, 백그라운드 전환·종료, Doze 시나리오를 검증했습니다(debug, R8 release). Doze는 해제 후 프로세스 freeze 때문에 다음 실행에서 전달된 경우를 포함하며, 판정과 한계는 `docs/design/v1-physical-device-report.md`에 있습니다.
+- 물리 기기 1대(Galaxy S23, Android 16 / API 36)에서 기본 시나리오와 비행기 모드, Wi-Fi↔LTE 전환, 백그라운드 전환·종료, Doze 시나리오를 검증했습니다(debug, R8 release). Doze는 해제 후 프로세스 freeze 때문에 다음 실행에서 전달된 경우를 포함하며, 판정과 한계는 `docs/design/v1-physical-device-report.md`에 있습니다. **미해결 1건**: 비행기 모드 시나리오 재실행 1회에서, 네트워크가 연달아 전환된 뒤 앱이 전면에 있는데도 약 4분 동안 전송되지 않았습니다(원인 미확정, 보고서 12장).
 - **검증하지 않은 것**: 다른 제조사·Android 버전의 물리 기기, API 24~32·34~35, 실제 운영 서버, 공인 CA 인증서·핀닝·프록시, 손실·지연이 큰 실제 모바일 네트워크, 자연 발생 Doze(강제 진입만 검증), 저장 지연과 처리량 측정. 자세한 목록은 `docs/design/v1-final-report.md`에 있습니다.
 
 ## 개발
@@ -219,3 +219,6 @@ python3 tools/device-verification/verify.py --serial emulator-5554 --variant deb
 - **배포와 sample 빌드를 한 번의 Gradle 실행에서 함께 하면**, sample이 이전 스냅샷으로 컴파일될 수 있습니다. 위처럼 나눠서 실행하세요.
 `tools/device-verification/verify.py`는 로컬 HTTPS 계약 서버(테스트 전용)를 띄우고, adb로 `:sample` 앱의 시나리오를 실행합니다. 시나리오에는 TLS, StrictMode, 프로세스 종료 후 복원, 리다이렉트, 단건 격리가 포함됩니다. 물리 기기 사용법은 `verify.py` 머리말과 `docs/design/v1-physical-device-report.md`에 있습니다.
 - **sample의 테스트 인증서 신뢰 범위**: sample 앱은 `-PsampleEndpoint`(기본 `https://10.0.2.2:8443/v1/batch`)의 **호스트 하나에만** 테스트 CA를 신뢰합니다(API 24 이상은 빌드 때 생성되는 network security config, API 23은 호스트별 `SSLSocketFactory`). https가 아니거나 loopback·사설 IPv4가 아닌 주소는 빌드가 실패합니다. 이것은 sample 전용이며, SDK는 인증서 검증을 바꾸지 않고 플랫폼 기본 `HttpsURLConnection` 설정을 따릅니다.
+
+## 라이선스
+[MIT License](LICENSE)
