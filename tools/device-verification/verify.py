@@ -30,6 +30,8 @@ sample은 -PsampleEndpoint의 호스트 하나에만 테스트 CA를 신뢰한�
 판정: PASS, FAIL, ENV(네트워크 미복구 등 테스트 환경 문제), REVIEW(확인 불가 또는 미분류 StrictMode),
 LIMIT(v1 설계 범위의 제약을 확인함. PASS가 아님. 예: P5에서 프로세스 freeze로 Doze 해제 후 재시도 없음).
 시나리오별 증거: results/physical/<variant>-<ID>-{summary,logcat}.txt
+전제조건(PRECONDITIONS): 시작 전 잠금(또는 P1·P2에서 앱이 TOP이 아님)이면 실행하지 않고 ENV.
+실행 중 잠금·비TOP은 판정을 바꾸지 않고 detail과 결과 JSON(precondition_violations)에만 기록한다.
 
 에뮬레이터는 10.0.2.2로 호스트 PC에 접근한다. 인증서(mock_cert.pem)는 sample 앱이 신뢰하도록
 sample/src/main/res/raw/mock_ca.pem에 같은 파일을 둔다. 키가 없으면 새로 만들고 sample에 복사한다
@@ -78,12 +80,14 @@ class ServerState:
             self.links = set()
             self.single_counter = 0
             self.probes = []  # 기기 셸의 curl 연결 확인 (GET /probe). SDK 요청(POST /v1/batch)과 구분된다
+            self.conns = []  # E3: TCP 연결 수락과 TLS 결과 {t, client, port, event, err}
 
     def snapshot(self):
         with self.lock:
             return {
                 "requests": list(self.requests),
                 "probes": list(self.probes),
+                "conns": list(self.conns),
                 "stored": dict(self.stored),
                 "links": set(self.links),
             }
@@ -92,13 +96,23 @@ class ServerState:
 STATE = ServerState()
 
 
+def record_conn(address, event, err=None):
+    with STATE.lock:
+        STATE.conns.append({"t": time.time(), "client": address[0], "port": address[1], "event": event, "err": err})
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def setup(self):
         # TLS handshake를 연결마다 자기 스레드에서 한다. accept 루프에서 하면, handshake를 끝내지 않는
         # 연결 하나가 서버 전체를 멈춘다 (7단계 첫 실행에서 실제로 발생).
-        self.request.do_handshake()
+        try:
+            self.request.do_handshake()
+        except Exception as e:  # E3: TLS 실패도 기록한다 (동작은 그대로: 예외를 다시 던져 연결을 닫는다)
+            record_conn(self.client_address, "tls-fail", type(e).__name__)
+            raise
+        record_conn(self.client_address, "tls-ok")
         super().setup()
 
     def log_message(self, *args):  # 조용히
@@ -133,7 +147,7 @@ class Handler(BaseHTTPRequestHandler):
         def record(status):
             with STATE.lock:
                 STATE.requests.append({"t": now, "path": self.path, "ids": ids, "status": status, "bytes": len(raw),
-                                       "client": self.client_address[0],
+                                       "client": self.client_address[0], "port": self.client_address[1],
                                        "names": [str(e.get("event") or e.get("name")) for e in (batch or [])]})
 
         if self.path != "/v1/batch":
@@ -245,6 +259,7 @@ class TlsServer(ThreadingHTTPServer):
 
     def get_request(self):
         sock, address = self.socket.accept()
+        record_conn(address, "accept")  # E3: TCP 연결 수락 (TLS 이전)
         sock.settimeout(30)  # 멈춘 연결은 30초 뒤 정리된다
         return self.context.wrap_socket(sock, server_side=True, do_handshake_on_connect=False), address
 
@@ -409,6 +424,20 @@ class Device:
         return {"airplane": lines[0] if lines else "?", "wifi_on": lines[1] if len(lines) > 1 else "?",
                 "wlan0": ip, "default": default}
 
+    def ui_state(self):
+        """앱 procState와 화면 잠금 상태. 읽을 수 없는 값은 None(알 수 없음)으로 둔다.
+        procState: 2=TOP, 12=TOP_SLEEPING(잠금 화면 뒤의 최상위) 등 (AOSP ActivityManager 상수)."""
+        out = self.adb("shell", "echo pid=$(pidof %s); "
+                       "dumpsys activity processes %s | grep -m1 -oE 'curProcState=[0-9]+'; "
+                       "dumpsys window | grep -oE 'isKeyguardShowing=[a-z]+' | head -1" % (PACKAGE, PACKAGE),
+                       check=False, timeout=30)
+        pid = re.search(r"pid=(\d+)", out)
+        proc = re.search(r"curProcState=(\d+)", out)
+        kg = re.search(r"isKeyguardShowing=(true|false)", out)
+        return {"app_pid": pid.group(1) if pid else None,
+                "proc": proc.group(1) if proc else None,
+                "locked": (kg.group(1) == "true") if kg else None}
+
     def probe(self, host, tag):
         """SDK와 별개의 연결 확인: 기기 셸의 curl이 기기의 실제 네트워크로 Mac 서버에 GET /probe를 보낸다."""
         out = self.adb("shell", "if command -v curl >/dev/null; then "
@@ -417,6 +446,31 @@ class Device:
                        "else nc -w 5 %s %d </dev/null >/dev/null 2>&1 && echo tcp-ok || echo \"tcp-fail rc=$?\"; fi"
                        % (host, PORT, tag, host, PORT), check=False, timeout=30)
         return out.strip()
+
+    def app_uid(self):
+        out = self.adb("shell", "cmd package list packages -U %s 2>/dev/null" % PACKAGE, check=False)
+        m = re.search(r"package:%s uid:(\d+)" % re.escape(PACKAGE), out)
+        return m.group(1) if m else None
+
+    def app_state(self, uid):
+        """E5: 앱 프로세스·화면 잠금·UID 네트워크 차단 상태와 앱 UID의 소켓(E2). 읽기 전용."""
+        cmd = ("echo pid=$(pidof %s); "
+               "dumpsys activity processes %s | grep -m1 -oE 'curProcState=[0-9]+'; "
+               "dumpsys window | grep -oE '(isKeyguardShowing|mKeyguardOccluded)=[a-z]+' | sort -u; "
+               "dumpsys power | grep -m1 -oE 'mWakefulness=[A-Za-z]+'; "
+               "dumpsys connectivity 2>/dev/null | grep -m1 -E 'UID=%s blockedReasons' || echo 'blockedReasons=(no entry)'; "
+               "echo sockets:; cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | "
+               "awk '$8==%s {split($3,r,\":\"); print \"  st=\"$4\" remport=\"r[2]}'"
+               % (PACKAGE, PACKAGE, uid, uid))
+        return self.adb("shell", cmd, check=False, timeout=60).strip()
+
+    def appuid_probe(self, host, tag):
+        """E1: 앱 UID로(run-as) 서버 연결 확인. 앱 프로세스 자체가 아니라 같은 UID의 별도 프로세스다.
+        release(디버그 불가) 빌드에서는 run-as가 거부되므로 n/a로 표시한다."""
+        out = self.adb("shell", "run-as %s curl -sk -m 5 -o /dev/null -w '%%{http_code}' "
+                       "'https://%s:%d/probe?appuid-%s' 2>&1; echo \" rc=$?\"" % (PACKAGE, host, PORT, tag),
+                       check=False, timeout=30).strip()
+        return "n/a(run-as 불가)" if "not debuggable" in out or "run-as:" in out else out
 
     def clear_log(self):
         self.adb("logcat", "-b", "all", "-c", check=False)
@@ -476,6 +530,7 @@ class NetTimeline:
         while not self._stop.is_set():
             try:
                 state = self.device.net_state()
+                state.update(self.device.ui_state())  # 개선 1: procState와 잠금 상태
                 if self.host:
                     n += 1
                     state["probe"] = self.device.probe(self.host, "timeline-%d" % n)
@@ -490,11 +545,63 @@ class NetTimeline:
             self._stop.wait(self.interval)
 
 
+def take_snapshot(device, uid, host, reason, sink):
+    """E5 진단 스냅샷 한 번: 앱 상태(E2 소켓 포함), 셸 probe, 앱 UID probe(E1)."""
+    t = time.time()
+    state = device.app_state(uid) if uid else "uid 알 수 없음"
+    probe_shell = device.probe(host, "diag") if host else "-"
+    probe_app = device.appuid_probe(host, "diag") if host else "-"
+    sink.append({"t": t, "reason": reason, "state": state, "probe_shell": probe_shell, "probe_app": probe_app})
+    print("    [diag %s] %s | shell=%s app-uid=%s" % (time.strftime("%H:%M:%S"), reason, probe_shell, probe_app),
+          flush=True)
+
+
+class DeliveryWatcher:
+    """
+    E5: 서버 도달 확인 뒤 전달을 기다리는 동안 별도 스레드에서 진단 스냅샷을 모은다.
+    - SDK 실패 로그(`Upload failed`)가 새로 나온 순간
+    - 도달 확인 뒤 20/60/180/340초에 아직 전달되지 않았을 때
+    판정과 대기 시간에는 관여하지 않는다(기다리는 쪽은 서버 기록만 본다).
+    """
+
+    def __init__(self, device, uid, log_path, host, done, t_reach, sink):
+        self.device, self.uid, self.log_path, self.host = device, uid, log_path, host
+        self.done, self.t_reach, self.sink = done, t_reach, sink
+        self._stop = threading.Event()
+        self._offset = os.path.getsize(log_path)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(120)
+
+    def snapshot(self, reason):
+        take_snapshot(self.device, self.uid, self.host, reason, self.sink)
+
+    def _run(self):
+        marks = [20, 60, 180, 340]
+        while not self._stop.is_set() and not self.done():
+            with open(self.log_path, "rb") as f:
+                f.seek(self._offset)
+                chunk = f.read()
+            self._offset += len(chunk)
+            for line in chunk.decode("utf-8", "replace").splitlines():
+                if "MiniAnalytics" in line and "Upload failed" in line:
+                    self.snapshot("SDK 실패 로그: " + line.split("MiniAnalytics:", 1)[-1].strip()[:120])
+            elapsed = time.time() - self.t_reach
+            while marks and elapsed >= marks[0]:
+                self.snapshot("도달 확인 +%ds, 아직 전달 안 됨" % marks.pop(0))
+            self._stop.wait(1)
+
+
 def fmt_t(t):
     return time.strftime("%H:%M:%S", time.localtime(t)) + ".%03d" % int((t % 1) * 1000)
 
 
-def save_artifacts(base, name, status, detail, started, samples, snap, log_path):
+def save_artifacts(base, name, status, detail, started, samples, snap, log_path, diag=()):
     """시나리오별 증거: 네트워크 타임라인, 서버 수신 기록(SDK 요청과 probe 구분), SDK 로그 요약 (T3)."""
     with open(base + "-summary.txt", "w") as f:
         f.write("%s\nstatus: %s\nstarted: %s\ndetail: %s\n\n" % (name, status, fmt_t(started), detail))
@@ -510,11 +617,73 @@ def save_artifacts(base, name, status, detail, started, samples, snap, log_path)
         if probes:
             f.write("count=%d first=%s last=%s clients=%s\n" % (len(probes), fmt_t(probes[0]["t"]),
                     fmt_t(probes[-1]["t"]), sorted({p["client"] for p in probes})))
+        f.write("\n== server: TCP/TLS connections (E3, probe와 SDK를 모두 포함. 포트로 SDK 요청과 짝지을 수 있음)\n")
+        for c in snap.get("conns", []):
+            f.write("%s %-8s %s:%s%s\n" % (fmt_t(c["t"]), c["event"], c["client"], c["port"],
+                                          " " + c["err"] if c.get("err") else ""))
+        if diag:
+            f.write("\n== diagnostics (E1 app-uid probe, E2 app-uid sockets, E5 state)\n")
+            for d in diag:
+                f.write("--- %s %s\nshell probe=%s, app-uid probe=%s\n%s\n" % (
+                    fmt_t(d["t"]), d["reason"], d["probe_shell"], d["probe_app"], d["state"]))
         f.write("\n== logcat: MiniAnalytics / MiniAnalyticsSample tags (full: %s)\n" % os.path.basename(log_path))
         with open(log_path, errors="replace") as lf:
             for line in lf:
                 if " MiniAnalytics" in line and "MiniAnalyticsStrict" not in line:
                     f.write(line)
+
+
+# 시나리오별 전제조건 (개선 2·3).
+#  start : 시작 전에 확인. 깨져 있으면 시나리오를 실행하지 않고 ENV.
+#  during: 실행 중 5초 타임라인으로 확인. 깨져도 판정은 바꾸지 않고 진단 정보로만 남긴다.
+#          "window"면 전달 대기 구간(서버 도달 확인 ~ 대기 끝)만 본다.
+#  unlocked = 잠금 화면이 아님, top = 앱 procState 2(TOP).
+#  P3·P4·P5는 백그라운드·종료·Doze를 의도적으로 검증하므로 TOP을 요구하지 않는다.
+PRECONDITIONS = {
+    "P1": {"start": ("unlocked", "top"), "during": ("unlocked", "top"), "window": True},
+    "P2": {"start": ("unlocked", "top"), "during": ("unlocked", "top"), "window": True},
+    "P3": {"start": ("unlocked",), "during": ("unlocked",), "window": False},
+    "P4": {"start": ("unlocked",), "during": ("unlocked",), "window": False},
+    "P5": {"start": ("unlocked",), "during": ("unlocked",), "window": False},
+}
+DEFAULT_PRECONDITION = {"start": ("unlocked",), "during": (), "window": False}
+
+
+def check_start_precondition(device, sid):
+    """깨진 전제조건 목록을 돌려준다. 알 수 없는 값(None)은 위반으로 보지 않는다."""
+    need = PRECONDITIONS.get(sid, DEFAULT_PRECONDITION)["start"]
+    broken = []
+    st = device.ui_state()
+    if "unlocked" in need and st["locked"] is True:
+        broken.append("기기가 잠겨 있음(isKeyguardShowing=true)")
+    if "top" in need and not broken:
+        device.start()  # 앱을 띄워 TOP이 되는지 본다 (action 없음)
+        wait_until(lambda: device.ui_state()["proc"] == "2", 5, 0.5)
+        st = device.ui_state()
+        if st["proc"] is not None and st["proc"] != "2":
+            broken.append("앱이 TOP이 아님(procState=%s, locked=%s)" % (st["proc"], st["locked"]))
+    return broken, st
+
+
+def during_violations(sid, samples, window):
+    """타임라인 샘플에서 실행 중 전제조건 위반을 찾는다 (판정에는 쓰지 않음)."""
+    spec = PRECONDITIONS.get(sid, DEFAULT_PRECONDITION)
+    if not spec["during"]:
+        return []
+    if spec["window"] and not window:
+        return []  # 전달 대기 구간에 이르지 못함 (오프라인 재시작 등 의도된 비TOP 구간을 위반으로 보지 않는다)
+    lo, hi = window if spec["window"] else (float("-inf"), float("inf"))
+    rows = [x for x in samples if "proc" in x and lo <= x["t"] <= hi]
+    out = []
+    locked = [x for x in rows if x.get("locked") is True]
+    if "unlocked" in spec["during"] and locked:
+        out.append("잠금 %d/%d샘플(첫 %s)" % (len(locked), len(rows), fmt_t(locked[0]["t"])))
+    not_top = [x for x in rows if x.get("proc") not in (None, "2")]
+    if "top" in spec["during"] and not_top:
+        procs = sorted({x["proc"] for x in not_top})
+        out.append("비TOP %d/%d샘플(procState %s, 첫 %s)" % (len(not_top), len(rows), ",".join(procs),
+                                                          fmt_t(not_top[0]["t"])))
+    return out
 
 
 def run_scenarios(device, variant, suite="basic", only=None, out_dir=None):
@@ -542,11 +711,18 @@ def run_scenarios(device, variant, suite="basic", only=None, out_dir=None):
                                      "-b", "system", "-b", "crash"], stdout=log_file, stderr=subprocess.STDOUT)
         ctx["timeline"] = timeline
         ctx["log_path"] = log_path
+        ctx["diag"] = []
+        ctx["diag_threads"] = []
         if suite == "physical":
             timeline.start()
         env_problem = None
         override = None
+        ctx["window"] = None
         try:
+            broken, st0 = check_start_precondition(device, sid)
+            timeline.mark("시작 전제조건: %s" % (broken or "충족") + " (procState=%s, locked=%s)" % (st0["proc"], st0["locked"]))
+            if broken:
+                raise EnvProblem("시작 전제조건 미충족, 시나리오를 실행하지 않음: " + "; ".join(broken))
             outcome = fn()
             ok, detail = outcome[0], outcome[1]
             override = outcome[2] if len(outcome) > 2 else None  # PASS로 표시하면 안 되는 결과 (LIMIT, REVIEW)
@@ -591,9 +767,13 @@ def run_scenarios(device, variant, suite="basic", only=None, out_dir=None):
             detail += " legacyStrictMode=%s" % legacy_strict[:1]
         if crashes:
             detail += " crash=%s" % crashes[:1]
+        violations_during = during_violations(sid, timeline.samples, ctx.get("window")) if not env_problem else []
+        if violations_during:  # 판정은 그대로 두고 진단 정보만 덧붙인다 (개선 3)
+            detail += " | 실행 중 전제조건 위반 관찰: %s" % "; ".join(violations_during)
         save_artifacts(os.path.join(artifacts, "%s-%s" % (variant, sid)), name, status, detail, started,
-                       timeline.samples, STATE.snapshot(), log_path)
+                       timeline.samples, STATE.snapshot(), log_path, ctx.get("diag", []))
         results.append({"variant": variant, "api": device.api, "scenario": name, "ok": status == "PASS",
+                        "precondition_violations": violations_during,
                         "status": status, "crashes": len(crashes), "anrs": len(anrs), "strict": counts,
                         "violations": violations, "seconds": round(time.time() - started, 1), "detail": detail})
         print("  %-6s %s — %s" % (status, name, detail), flush=True)
@@ -736,7 +916,12 @@ def run_scenarios(device, variant, suite="basic", only=None, out_dir=None):
 
     def wait_delivery(prefix, count, t_reach):
         remaining = max(0, DELIVERY_WAIT - (time.time() - t_reach))
-        delivered = wait_until(lambda: len(stored_names(prefix)) == count, remaining, 1)
+        done = lambda: len(stored_names(prefix)) == count
+        watcher = DeliveryWatcher(device, device.app_uid(), ctx["log_path"], LAN_HOST, done, t_reach, ctx["diag"])
+        watcher.start()
+        delivered = wait_until(done, remaining, 1)
+        ctx["window"] = (t_reach, time.time())
+        watcher.stop()
         after = [r for r in STATE.snapshot()["requests"] if r["t"] >= t_reach]
         done_at = next((r["t"] for r in after if any(n.startswith(prefix) for n in r.get("names", []))
                         and r["status"] == 200), None)
@@ -773,6 +958,7 @@ def run_scenarios(device, variant, suite="basic", only=None, out_dir=None):
         precheck()
         device.start(action="track", prefix=p + "p1warm", count=2)
         ok0 = wait_until(lambda: len(stored_names(p + "p1warm-")) == 2, 30)
+        diag_async("warm-up 직후")
         device.airplane(True)
         mark("비행기 모드 켬")
         offline = wait_until(lambda: device.default_network() == "none", 15, 1)
@@ -790,6 +976,7 @@ def run_scenarios(device, variant, suite="basic", only=None, out_dir=None):
         device.force_stop()
         device.start()  # 오프라인 상태로 재시작 (영속성)
         mark("오프라인 재시작")
+        diag_async("오프라인 재시작 직후")
         time.sleep(5)
         leaked = len(stored_names(p + "p1-"))
         t_restore = time.time()
@@ -804,12 +991,41 @@ def run_scenarios(device, variant, suite="basic", only=None, out_dir=None):
         else:
             mark("Wi-Fi는 시스템이 복원 (wifi_on=%s)" % device.setting("wifi_on"))
         t_reach = recover_network(t_restore)
+        diag_async("서버 도달 확인 시점")
         delivered, info = wait_delivery(p + "p1-", 10, t_reach)
+        for t in ctx.get("diag_threads", []):
+            t.join(60)
         counts = received_count_by_name(p + "p1-")
         dup = {k: v for k, v in counts.items() if v > 1}
+        e6 = "" if delivered else "; E6 " + compare_processes(p + "p1-", 10)
         return (ok0 and leaked == 0 and delivered), (
-            "LAN 경로=%s, 오프라인 probe=%s, 오프라인 중 서버 도착=%d건(0이어야 함), 10건 전달=%s (%s), 재전송 중복 도착=%s"
-            % (ok0, offline_probe, leaked, delivered, info, dup or "없음"))
+            "LAN 경로=%s, 오프라인 probe=%s, 오프라인 중 서버 도착=%d건(0이어야 함), 10건 전달=%s (%s), 재전송 중복 도착=%s%s"
+            % (ok0, offline_probe, leaked, delivered, info, dup or "없음", e6))
+
+    def diag_async(reason):
+        """시나리오 흐름을 기다리게 하지 않고 상태 스냅샷을 남긴다 (별도 스레드)."""
+        t = threading.Thread(target=take_snapshot, args=(device, device.app_uid(), LAN_HOST, reason, ctx["diag"]),
+                             daemon=True)
+        t.start()
+        ctx.setdefault("diag_threads", []).append(t)
+
+    def compare_processes(prefix, count):
+        """
+        E6: 판정이 끝난 뒤(FAIL 확정 후)에만 실행한다. 기존 프로세스의 상태를 기록한 다음,
+        강제 종료하고 새 프로세스를 띄워 60초 안에 전달되는지 본다. 판정은 바꾸지 않는다.
+        """
+        uid = device.app_uid()
+        take_snapshot(device, uid, LAN_HOST, "E6 기존 프로세스 (강제 종료 직전)", ctx["diag"])
+        device.force_stop()
+        t_new = time.time()
+        mark("E6 새 프로세스 시작")
+        device.start()
+        new_ok = wait_until(lambda: len(stored_names(prefix)) == count, 60, 1)
+        take_snapshot(device, uid, LAN_HOST, "E6 새 프로세스 (+%.0fs)" % (time.time() - t_new), ctx["diag"])
+        reqs = [r for r in STATE.snapshot()["requests"] if r["t"] >= t_new]
+        conns = [c for c in STATE.snapshot()["conns"] if c["t"] >= t_new and c["event"] == "accept"]
+        return "새 프로세스: 60초 안에 전달=%s, SDK 요청 %d건, TCP 수락 %d건 (기존 프로세스와 비교는 diag 참조)" % (
+            new_ok, len(reqs), len(conns))
 
     def p2_wifi_to_mobile():
         precheck()
@@ -1007,6 +1223,16 @@ def main():
     print("기기 원래 상태:", original, flush=True)
     if args.reverse:
         device.adb("reverse", "tcp:%d" % PORT, "tcp:%d" % PORT)
+    if device.serial.startswith("emulator-"):
+        # 에뮬레이터는 부팅 뒤 보안 없는 잠금 화면이 남아 있을 수 있다. 시작 전제조건(잠금 해제)에서 모든 시나리오가
+        # ENV가 되지 않도록 한 번 깨우고 해제한다. 물리 기기에는 하지 않는다(보안 잠금은 도구가 풀 수 없다).
+        device.shell("input keyevent KEYCODE_WAKEUP")
+        for _ in range(3):  # 화면이 완전히 켜진 뒤에야 해제되는 경우가 있어 확인하며 반복한다
+            time.sleep(1)
+            device.shell("wm dismiss-keyguard")
+            if wait_until(lambda: device.ui_state()["locked"] is not True, 10, 0.5):
+                break
+        print("에뮬레이터 잠금 화면 상태: locked=%s" % device.ui_state()["locked"], flush=True)
     if args.suite == "physical":  # 긴 대기 중 화면 꺼짐·잠금으로 시나리오가 흔들리지 않도록 (종료 시 원래 값으로)
         device.shell("svc power stayon usb")
         device.shell("input keyevent KEYCODE_WAKEUP")
