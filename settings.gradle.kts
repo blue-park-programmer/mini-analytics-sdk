@@ -24,3 +24,6 @@ rootProject.name = "mini-analytics-sdk"
 
 include(":mini-analytics")
 include(":sample")
+// Step 8 성능 측정 전용 (배포하지 않음)
+include(":benchmark-host")
+include(":benchmark")

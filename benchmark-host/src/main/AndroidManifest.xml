@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:name=".BenchApplication"
+        android:label="mini-analytics bench"
+        android:networkSecurityConfig="@xml/bench_network_security_config">
+
+        <!-- release에서도 셸 프로파일링 도구(Perfetto, simpleperf)를 붙일 수 있게 한다. 디버그 가능은 아니다. -->
+        <profileable android:shell="true" />
+
+        <activity
+            android:name=".BenchActivity"
+            android:exported="true" />
+    </application>
+</manifest>

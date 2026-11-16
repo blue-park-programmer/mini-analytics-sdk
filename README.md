@@ -219,6 +219,7 @@ python3 tools/device-verification/verify.py --serial emulator-5554 --variant deb
 - **배포와 sample 빌드를 한 번의 Gradle 실행에서 함께 하면**, sample이 이전 스냅샷으로 컴파일될 수 있습니다. 위처럼 나눠서 실행하세요.
 `tools/device-verification/verify.py`는 로컬 HTTPS 계약 서버(테스트 전용)를 띄우고, adb로 `:sample` 앱의 시나리오를 실행합니다. 시나리오에는 TLS, StrictMode, 프로세스 종료 후 복원, 리다이렉트, 단건 격리가 포함됩니다. 물리 기기 사용법은 `verify.py` 머리말과 `docs/design/v1-physical-device-report.md`에 있습니다.
 - **sample의 테스트 인증서 신뢰 범위**: sample 앱은 `-PsampleEndpoint`(기본 `https://10.0.2.2:8443/v1/batch`)의 **호스트 하나에만** 테스트 CA를 신뢰합니다(API 24 이상은 빌드 때 생성되는 network security config, API 23은 호스트별 `SSLSocketFactory`). https가 아니거나 loopback·사설 IPv4가 아닌 주소는 빌드가 실패합니다. 이것은 sample 전용이며, SDK는 인증서 검증을 바꾸지 않고 플랫폼 기본 `HttpsURLConnection` 설정을 따릅니다.
+- **성능 벤치마크(측정 전용, 배포하지 않음)**: `:benchmark-host`, `:benchmark` 모듈과 `tools/benchmark/` 실행기로 실기기에서 호출 지연·간헐 호출·SQLite 저장·배경 CPU를 측정합니다. 사용법·필요 환경·측정 조건·결과 위치는 [`tools/benchmark/README.md`](tools/benchmark/README.md), 결과는 [`docs/design/v1-benchmark-report.md`](docs/design/v1-benchmark-report.md)에 있습니다. 벤치마크 모듈은 SDK AAR이나 SDK 런타임 의존성에 포함되지 않습니다.
 
 ## 라이선스
 [MIT License](LICENSE)

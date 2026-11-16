@@ -11,6 +11,9 @@ local.properties
 *.iml
 .DS_Store
 
+# Step 8 벤치마크 원시 결과
+tools/benchmark/results/
+
 # Python (tools/device-verification)
 __pycache__/
 *.pyc
