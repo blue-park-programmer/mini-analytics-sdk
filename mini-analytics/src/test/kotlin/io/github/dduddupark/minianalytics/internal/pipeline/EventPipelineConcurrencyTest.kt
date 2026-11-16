@@ -13,6 +13,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 실제 스레드 여러 개에서 동시에 호출할 때의 순서와 식별자 일관성 (설계 §11.1, R-1, R-3).
@@ -24,11 +25,17 @@ class EventPipelineConcurrencyTest {
     private val threads = 8
     private val iterations = 100
 
-    private fun runConcurrently(action: (EventPipeline, thread: Int, i: Int) -> Unit): List<StoredMessage> {
+    private fun runConcurrently(
+        clock: () -> Long = System::currentTimeMillis,
+        action: (EventPipeline, thread: Int, i: Int) -> Unit,
+    ): List<StoredMessage> {
         val store = InMemoryEventStore()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
         try {
-            val pipeline = EventPipeline(store, 10_000, scope, CallbackDispatcher(ManualExecutor(), RecordingLogger()), RecordingLogger())
+            val pipeline = EventPipeline(
+                store, 10_000, scope, CallbackDispatcher(ManualExecutor(), RecordingLogger()), RecordingLogger(),
+                clock = clock,
+            )
             val start = CountDownLatch(1)
             val workers = (0 until threads).map { t ->
                 Thread {
@@ -114,5 +121,24 @@ class EventPipelineConcurrencyTest {
             val expected = (0 until iterations).filter { it % 14 != 0 && it % 7 != 3 }.map { "t$t-$it" }
             assertEquals(expected, own)
         }
+    }
+
+    /**
+     * Step 8 최적화 3: 직렬화기(SimpleDateFormat)를 storage coroutine이 재사용해도, 실제 스레드 여러 개가 동시에
+     * 호출하는 상황에서 timestamp가 깨지지 않는다(동시에 쓰이면 잘못된 문자열이 섞인다).
+     */
+    @Test
+    fun `reused serializer produces exactly the expected timestamps under concurrent producers`() {
+        val tick = AtomicLong(0)
+        val step = 3_600_123L // 호출마다 다른 시각(시·분·초·밀리초가 모두 바뀌도록)
+        val messages = runConcurrently(clock = { 951_782_400_000L + tick.getAndIncrement() * step }) { pipeline, t, i ->
+            pipeline.track("t$t-$i", null)
+        }
+        val format = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }
+        val expected = (0 until threads * iterations).map { format.format(java.util.Date(951_782_400_000L + it * step)) }
+        assertEquals(threads * iterations, messages.size)
+        assertEquals(expected.sorted(), messages.map { it.timestamp }.sorted())
     }
 }

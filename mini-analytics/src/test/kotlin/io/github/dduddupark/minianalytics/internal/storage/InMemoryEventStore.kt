@@ -31,7 +31,7 @@ internal class InMemoryEventStore : EventStore {
         events = workingEvents
         nextId = workingNextId
         transaction.identity?.let { identity = it }
-        return CommitResult(evictedEvents, evictedIdentifies)
+        return CommitResult(evictedEvents, evictedIdentifies, counts())
     }
 
     override fun readBatch(maxCount: Int, maxBytes: Int): List<StoredEvent> {

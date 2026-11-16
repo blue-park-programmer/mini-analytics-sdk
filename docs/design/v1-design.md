@@ -208,7 +208,8 @@ ticker(flushInterval), flush() ───────────────► 
   - `Reset`: `next = Identity(userId = null, anonymousId = 명령에 담긴 새 값)`
   - 트랜잭션 끝에서 Identity가 바뀌었으면 identity 행을 UPSERT
 - 한 트랜잭션은 최대 K개(예: 50) 명령을 처리합니다. 트랜잭션이 길어져서 유실 창이 넓어지는 것을 막기 위해서입니다.
-- `SimpleDateFormat`(UTC)은 **트랜잭션 하나당** 새로 만들어 그 안에서만 씁니다 (R-11).
+- `SimpleDateFormat`(UTC)은 **storage coroutine 전용 인스턴스 하나**를 처음 직렬화할 때 만들어 계속 씁니다 (R-11 개정, Step 8). storage coroutine은 하나이고 한 번에 하나만 실행되는 dispatcher에서 돌므로 동시에 쓰이지 않으며, 실행 스레드가 바뀌어도 coroutine 재개가 앞선 쓰기의 가시성을 보장합니다(`current` Identity와 같은 독점 규칙). 호출 스레드에서는 만들지 않습니다.
+- 상한 정리를 위한 개수는 트랜잭션 안에서 **유형별 집계 쿼리 한 번**(`GROUP BY type`)으로 셉니다. commit 결과에 상한 정리 뒤의 개수를 담아 Uploader의 개수 신호(`저장 행 수 ≥ flushAt`)에 그대로 씁니다. commit 직후 다시 세던 것과 값·시점이 같습니다 (Step 8).
 
 ### 4.4 Uploader coroutine (Q22, Q23, R-5)
 - coroutine 하나로 동작하므로 그 자체로 single in-flight입니다.
@@ -687,3 +688,5 @@ storage coroutine 안에서 Throwable 발생 (재시도 경계 밖)
 | Q19 다른 설정으로 재초기화 시 경고 | R-6': `InitializeResult` + `Log.e`(바뀐 필드) | 반환값 계약의 명확화 |
 | Q20 별도의 복원 전 명령 버퍼 | R-1: 같은 큐 | 역할 중복 제거 |
 | Q24 단건 400/422면 영구 거부 | R-8'': `invalid_event` 코드가 있을 때만 삭제, 프로세스당 20건 | 서버 오류로 인한 대량 유실 방지 |
+| R-11 `SimpleDateFormat`은 트랜잭션마다 새로 생성 | R-11 개정 (Step 8): 저장 쪽은 storage coroutine 전용 인스턴스 하나를 재사용. 업로드 `sentAt`은 요청마다 생성(그대로) | 간헐 저장에서 이벤트마다 생성·초기화 비용이 반복됨(Step 8 프로파일). 동시 사용이 없다는 보장은 storage coroutine 독점 규칙으로 유지 |
+| commit 뒤 `counts()`로 개수를 다시 셈, 트랜잭션 안에서 유형 묶음마다 COUNT | commit 결과에 개수를 담고, 트랜잭션 안의 개수는 집계 쿼리 한 번 (Step 8) | 간헐 저장에서 commit마다 COUNT 4회가 반복됨. 값·시점·상한 정리 결과는 같음(테스트로 확인) |

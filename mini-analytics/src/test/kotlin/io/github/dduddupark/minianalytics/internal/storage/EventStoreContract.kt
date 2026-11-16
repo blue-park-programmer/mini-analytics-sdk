@@ -150,7 +150,42 @@ internal abstract class EventStoreContract {
     @Test
     fun noEvictionWithinLimits() {
         val result = commit(event(), event(MessageType.IDENTIFY), maxEvents = 1, maxIdentifies = 1)
-        assertEquals(CommitResult(0, 0), result)
+        assertEquals(CommitResult(0, 0, StoreCounts(events = 1, identifies = 1)), result)
+    }
+
+    /** Step 8 최적화 2: 두 유형 묶음이 한 트랜잭션에서 함께 상한을 넘어도 유형별로 오래된 것부터 정리된다. */
+    @Test
+    fun bothLimitsExceededInOneTransactionEvictPerTypeOldestFirst() {
+        // id 순서: t0 i1 s2 i3 t4 i5 t6
+        commit(event(), event(MessageType.IDENTIFY), event(MessageType.SCREEN), event(MessageType.IDENTIFY))
+        val result = commit(event(), event(MessageType.IDENTIFY), event(), maxEvents = 2, maxIdentifies = 1)
+
+        assertEquals(2, result.evictedEvents)
+        assertEquals(2, result.evictedIdentifies)
+        assertEquals(StoreCounts(events = 2, identifies = 1), result.counts)
+        assertEquals(listOf("m-4", "m-5", "m-6"), allEvents().map { it.messageId })
+    }
+
+    // ---------- commit 결과의 개수 (Step 8 최적화 1) ----------
+
+    /** commit이 돌려준 개수는 commit 직후 [EventStore.counts]와 항상 같아야 한다(Uploader가 받는 값과 시점 보존). */
+    @Test
+    fun commitResultCountsEqualCountsRightAfterCommit() {
+        val steps: List<() -> CommitResult> = listOf(
+            { commit() }, // 빈 트랜잭션
+            { commit(event(), event(MessageType.SCREEN)) },
+            { commit(event(MessageType.IDENTIFY)) },
+            { commit(identity = identityA) }, // identity만
+            { commit(event(messageId = "dup"), event(messageId = "dup")) }, // 중복 messageId는 무시
+            { commit(event(messageId = "dup")) },
+            { commit(event(), event(), event(), maxEvents = 3) }, // track/screen 상한 정리
+            { commit(event(MessageType.IDENTIFY), event(MessageType.IDENTIFY), maxIdentifies = 2) }, // identify 상한 정리
+            { commit(event(), event(MessageType.IDENTIFY), maxEvents = 1, maxIdentifies = 1) }, // 둘 다 정리
+        )
+        for ((i, step) in steps.withIndex()) {
+            val result = step()
+            assertEquals("step $i", store.counts(), result.counts)
+        }
     }
 
     // ---------- 배치 읽기 ----------

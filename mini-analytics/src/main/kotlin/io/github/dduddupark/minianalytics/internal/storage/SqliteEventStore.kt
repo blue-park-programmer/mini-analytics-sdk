@@ -51,12 +51,17 @@ internal class SqliteEventStore(
         try {
             for (event in transaction.events) insertEvent(database, event)
             transaction.identity?.let { upsertIdentity(database, it) }
-            val evictedEvents = evictOldest(database, EVENT_TYPES, transaction.limits.maxQueuedEvents)
-            val evictedIdentifies =
-                evictOldest(database, IDENTIFY_TYPES, transaction.limits.maxQueuedIdentifies)
+            // 유형별 개수를 한 번의 집계 쿼리로 센다 (Step 8 최적화 2: 예전에는 유형 묶음마다 COUNT를 따로 했다).
+            // track/screen과 identify는 겹치지 않는 유형이라, 한쪽을 지워도 다른 쪽 개수는 바뀌지 않는다.
+            val perType = countPerType(database)
+            val (evictedEvents, events) =
+                evictOldest(database, EVENT_TYPES, transaction.limits.maxQueuedEvents, perType.sumOf(EVENT_TYPES))
+            val (evictedIdentifies, identifies) = evictOldest(
+                database, IDENTIFY_TYPES, transaction.limits.maxQueuedIdentifies, perType.sumOf(IDENTIFY_TYPES),
+            )
             beforeCommit?.invoke()
             database.setTransactionSuccessful()
-            return CommitResult(evictedEvents, evictedIdentifies)
+            return CommitResult(evictedEvents, evictedIdentifies, StoreCounts(events.toInt(), identifies.toInt()))
         } finally {
             database.endTransaction()
         }
@@ -146,9 +151,12 @@ internal class SqliteEventStore(
         database.insertWithOnConflict(TABLE_IDENTITY, null, values, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
-    private fun evictOldest(database: SQLiteDatabase, types: Array<String>, max: Int): Int {
-        val excess = countByTypes(database, types) - max
-        return if (excess > 0) deleteOldest(database, types, excess) else 0
+    /** [count]개 중 상한을 넘은 만큼 오래된 행부터 지우고, (지운 행 수, 남은 행 수)를 돌려준다. */
+    private fun evictOldest(database: SQLiteDatabase, types: Array<String>, max: Int, count: Long): Pair<Int, Long> {
+        val excess = count - max
+        if (excess <= 0) return 0 to count
+        val deleted = deleteOldest(database, types, excess)
+        return deleted to (count - deleted)
     }
 
     private fun deleteOldest(database: SQLiteDatabase, types: Array<String>, count: Long): Int =
@@ -158,6 +166,16 @@ internal class SqliteEventStore(
                 "ORDER BY $COL_ID LIMIT $count)",
             types,
         )
+
+    /** 유형별 행 수 (한 번의 쿼리). */
+    private fun countPerType(database: SQLiteDatabase): Map<String, Long> =
+        database.rawQuery("SELECT $COL_TYPE, COUNT(*) FROM $TABLE_EVENTS GROUP BY $COL_TYPE", null).use { cursor ->
+            val result = HashMap<String, Long>()
+            while (cursor.moveToNext()) result[cursor.getString(0)] = cursor.getLong(1)
+            result
+        }
+
+    private fun Map<String, Long>.sumOf(types: Array<String>): Long = types.sumOf { this[it] ?: 0L }
 
     private fun countByTypes(database: SQLiteDatabase, types: Array<String>): Long =
         DatabaseUtils.longForQuery(

@@ -35,6 +35,36 @@ internal class SqliteEventStoreTest : EventStoreContract() {
         return store
     }
 
+    /**
+     * Step 8 최적화 2: 유형별 COUNT를 하나의 집계 쿼리로 바꿔도 상한 정리 결과가 같아야 한다.
+     * 유형 묶음마다 따로 세는 기준 구현([InMemoryEventStore])과 무작위 commit 순서 400번을 나란히 적용해서
+     * 매번 정리 개수·남은 개수·남은 행(순서 포함)이 같은지 비교한다.
+     */
+    @Test
+    fun evictionMatchesPerTypeCountingReferenceForRandomCommits() {
+        val reference = InMemoryEventStore()
+        val random = java.util.Random(20261116)
+        val types = MessageType.values()
+        var n = 0
+        repeat(400) { step ->
+            val events = List(random.nextInt(6)) {
+                val type = types[random.nextInt(types.size)]
+                val id = if (random.nextInt(20) == 0 && n > 0) "m-${random.nextInt(n)}" else "m-${n++}" // 가끔 중복
+                NewEvent(id, type, "{}", 10)
+            }
+            val limits = StoreLimits(maxQueuedEvents = 1 + random.nextInt(12), maxQueuedIdentifies = 1 + random.nextInt(6))
+            val identity = if (random.nextInt(10) == 0) StoredIdentity(Identity("a", null), step.toLong()) else null
+            val expected = reference.commit(StoreTransaction(events, identity, limits))
+            val actual = store.commit(StoreTransaction(events, identity, limits))
+            assertEquals("step $step", expected, actual)
+            assertEquals(
+                "step $step",
+                reference.readBatch(Int.MAX_VALUE, Int.MAX_VALUE).map { it.messageId to it.type },
+                store.readBatch(Int.MAX_VALUE, Int.MAX_VALUE).map { it.messageId to it.type },
+            )
+        }
+    }
+
     @Test
     fun constructorDoesNotTouchTheDisk() {
         val name = "untouched.db"

@@ -10,7 +10,7 @@ import org.json.JSONObject
  *
  * storage coroutine이 이벤트를 INSERT할 때 호출하며, 결과 문자열이 DB `events.payload`가 된다.
  * 생성자로 받은 [Iso8601UtcFormatter]를 쓰므로 이 객체도 스레드 안전하지 않다.
- * 트랜잭션 하나 단위로 만들어 쓴다.
+ * storage coroutine 전용 인스턴스 하나를 재사용한다 (R-11 개정, `EventPipeline.storageSerializer`).
  *
  * 예외를 던지지 않는다. 실패는 [SerializationResult]로 돌려준다.
  */

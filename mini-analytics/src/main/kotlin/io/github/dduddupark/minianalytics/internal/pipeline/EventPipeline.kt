@@ -52,6 +52,8 @@ internal class EventPipeline(
     private val isStorageFull: (Throwable) -> Boolean = ::isSqliteFull,
     private val onCommitted: ((StoreCounts) -> Unit)? = null,
     private val fatalErrorHandler: (Throwable) -> Unit = ::forwardToUncaughtExceptionHandler,
+    /** storage coroutine이 처음 직렬화할 때 한 번 부른다(테스트에서 생성 횟수 확인용). */
+    private val newSerializer: () -> EventSerializer = { EventSerializer(Iso8601UtcFormatter()) },
 ) {
     /** 비활성화될 때 한 번 호출된다 (Uploader 정지용, 설계 §8.3). */
     @Volatile
@@ -73,6 +75,14 @@ internal class EventPipeline(
 
     // ---------- storage coroutine만 접근하는 상태 ----------
     private var current: StoredIdentity? = null
+
+    /**
+     * 직렬화기(안의 `SimpleDateFormat`은 스레드 안전하지 않다). **storage coroutine만** 만들고 쓴다 (R-11 개정, Step 8
+     * 최적화 3). storage coroutine은 하나이고 한 번에 하나만 실행되는 dispatcher에서 돌므로 동시에 쓰이지 않는다.
+     * 실행 스레드가 바뀌어도 coroutine 재개가 앞선 쓰기를 볼 수 있게 보장한다(`current`와 같은 규칙).
+     * 생성(로케일 데이터 로드)이 호출 스레드에서 일어나지 않도록 처음 쓸 때 만든다.
+     */
+    private var storageSerializer: EventSerializer? = null
 
     init {
         // 마지막 방어선 (설계 §8.4, Q-4b): 아래 try/catch를 벗어난 실패도 여기서 비활성화로 이어진다.
@@ -218,7 +228,7 @@ internal class EventPipeline(
 
     private fun prepare(batch: List<Command>): PreparedBatch {
         val base = current!!
-        val serializer = EventSerializer(Iso8601UtcFormatter()) // 트랜잭션 단위로 생성 (R-11)
+        val serializer = storageSerializer ?: newSerializer().also { storageSerializer = it } // storage coroutine 전용 (R-11)
         var identity = base.identity
         var version = base.version
         var oversized = 0
@@ -264,7 +274,8 @@ internal class EventPipeline(
 
         val hook = onCommitted ?: return
         try {
-            hook(store.counts())
+            // commit과 같은 트랜잭션에서 센 값 (예전에는 여기서 store.counts()로 다시 셌다. 값과 시점은 같다)
+            hook(result.counts)
         } catch (e: Exception) {
             logger.warn("Failed to report store counts after commit", e)
         }

@@ -88,8 +88,11 @@ internal data class StoreTransaction(
 /**
  * @property evictedEvents 상한 정리로 지운 track/screen 행 (`evictedFromStore`).
  * @property evictedIdentifies 상한 정리로 지운 identify 행 (`evictedIdentify`).
+ * @property counts commit **직후**의 행 수(상한 정리 뒤). 같은 트랜잭션 안에서 센 값이므로, commit 직후
+ *   [EventStore.counts]를 따로 부른 결과와 같다. Uploader의 개수 신호에 쓴다 (Step 8 최적화 1:
+ *   commit마다 트랜잭션 밖에서 COUNT를 두 번 더 하던 것을 없앤다).
  */
-internal data class CommitResult(val evictedEvents: Int, val evictedIdentifies: Int)
+internal data class CommitResult(val evictedEvents: Int, val evictedIdentifies: Int, val counts: StoreCounts)
 
 /** @property events track/screen 행 수. @property identifies identify 행 수. */
 internal data class StoreCounts(val events: Int, val identifies: Int) {

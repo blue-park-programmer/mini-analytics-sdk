@@ -5,6 +5,8 @@ package io.github.dduddupark.minianalytics.internal.pipeline
 import io.github.dduddupark.minianalytics.FailureReason
 import io.github.dduddupark.minianalytics.IdentityResult
 import io.github.dduddupark.minianalytics.internal.model.Identity
+import io.github.dduddupark.minianalytics.internal.serialization.EventSerializer
+import io.github.dduddupark.minianalytics.internal.serialization.Iso8601UtcFormatter
 import io.github.dduddupark.minianalytics.internal.storage.FaultyEventStore
 import io.github.dduddupark.minianalytics.internal.storage.InMemoryEventStore
 import io.github.dduddupark.minianalytics.internal.storage.StoreCounts
@@ -335,6 +337,56 @@ class EventPipelineTest {
         pipeline.identify("u", null)
         advanceUntilIdle()
         assertEquals(StoreCounts(events = 1, identifies = 1), reported.last())
+    }
+
+    /**
+     * Step 8 최적화 1: commit 뒤 Uploader에 넘기는 개수는 commit 결과에서 온다. 예전처럼 같은 시점(훅 안)에
+     * store.counts()를 직접 센 값과 매번 같은지, 상한 정리가 일어나는 경우까지 확인한다.
+     */
+    @Test
+    fun `reported counts equal store counts at the same moment for every commit`() = runTest {
+        val reported = mutableListOf<StoreCounts>()
+        val counted = mutableListOf<StoreCounts>()
+        val pipeline = pipeline(maxQueuedEvents = 3, onCommitted = { reported += it; counted += store.counts() })
+        repeat(5) { pipeline.track("t$it", null) }
+        advanceUntilIdle()
+        pipeline.identify("u1", null)
+        pipeline.screen("s", null)
+        advanceUntilIdle()
+        repeat(120) { pipeline.identify("u$it", null); advanceUntilIdle() } // identify 상한(100) 정리
+        pipeline.reset(null)
+        advanceUntilIdle()
+
+        assertTrue(reported.size >= 3)
+        assertEquals(counted, reported)
+        assertEquals(store.counts(), reported.last())
+    }
+
+    /** Step 8 최적화 3: 직렬화기(날짜 포맷터)는 처음 직렬화할 때 한 번만 만들고, 이후 트랜잭션에서도 정확한 시각을 쓴다. */
+    @Test
+    fun `serializer is created once and reused across transactions with correct timestamps`() = runTest {
+        var created = 0
+        val pipeline = EventPipeline(
+            store = store, maxQueuedEvents = 1_000, scope = pipelineScope(),
+            callbacks = CallbackDispatcher(main, logger), logger = logger, clock = { now }, newId = IdSequence(),
+            newSerializer = { created++; EventSerializer(Iso8601UtcFormatter()) },
+        )
+        advanceUntilIdle()
+        assertEquals(0, created) // 생성은 storage coroutine이 처음 직렬화할 때 (호출 스레드에서 하지 않음)
+        val times = listOf(0L, 1_000L, 86_399_999L, 951_782_400_000L, 4_102_444_799_999L)
+        for (t in times) {
+            now = t
+            pipeline.track("t$t", null)
+            advanceUntilIdle() // 트랜잭션 하나씩
+        }
+        assertEquals(1, created)
+        assertEquals(
+            listOf(
+                "1970-01-01T00:00:00.000Z", "1970-01-01T00:00:01.000Z", "1970-01-01T23:59:59.999Z",
+                "2000-02-29T00:00:00.000Z", "2099-12-31T23:59:59.999Z",
+            ),
+            store.messages().map { it.timestamp },
+        )
     }
 
     @Test
